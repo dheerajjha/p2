@@ -13,6 +13,21 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API_BASE = "https://trustmrr.com/api/v1/startups"
+MAX_FAVORABLE_MULTIPLE = 48
+MIN_FAVORABLE_MULTIPLE = 12
+MIN_MRR_CENTS = 50000
+MIN_CUSTOMERS = 100
+MIN_ACCEPTABLE_GROWTH = -0.2
+MRR_WEIGHT = 25
+MRR_MAX_SCORE = 40
+GROWTH_WEIGHT = 120
+GROWTH_MAX_SCORE = 20
+CUSTOMER_WEIGHT = 6
+CUSTOMER_MAX_SCORE = 12
+FAVORABLE_MULTIPLE_BONUS = 8
+ON_SALE_BONUS = 5
+FAVORABLE_CATEGORY_BONUS = 6
+FAVORABLE_CATEGORIES = {"AI", "Developer Tools", "Marketing"}
 
 
 def fetch_json(url: str, headers: dict[str, str], retries: int = 3) -> dict[str, Any]:
@@ -146,7 +161,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 def save_sqlite(db_path: Path, startups: list[dict[str, Any]]) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    scraped_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    scraped_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with sqlite3.connect(db_path) as conn:
         create_schema(conn)
         conn.executemany(
@@ -235,19 +250,19 @@ def copyability_score(startup: dict[str, Any]) -> float:
 
     score = 0.0
     if mrr > 0:
-        score += min(math.log10(mrr + 1) * 25, 40)
+        score += min(math.log10(mrr + 1) * MRR_WEIGHT, MRR_MAX_SCORE)
     if growth > 0:
-        score += min(growth * 120, 20)
+        score += min(growth * GROWTH_WEIGHT, GROWTH_MAX_SCORE)
     if customers > 0:
-        score += min(math.log10(customers + 1) * 6, 12)
+        score += min(math.log10(customers + 1) * CUSTOMER_WEIGHT, CUSTOMER_MAX_SCORE)
 
-    if multiple is not None and multiple <= 48:
-        score += 8
+    if multiple is not None and MIN_FAVORABLE_MULTIPLE <= multiple <= MAX_FAVORABLE_MULTIPLE:
+        score += FAVORABLE_MULTIPLE_BONUS
     if startup.get("on_sale"):
-        score += 5
+        score += ON_SALE_BONUS
 
-    if startup.get("category") in {"AI", "Developer Tools", "Marketing"}:
-        score += 6
+    if startup.get("category") in FAVORABLE_CATEGORIES:
+        score += FAVORABLE_CATEGORY_BONUS
 
     return round(score, 2)
 
@@ -258,9 +273,9 @@ def select_copyable_startups(startups: list[dict[str, Any]], top_n: int = 15) ->
         mrr = startup.get("mrr_cents") or 0
         customers = startup.get("customers") or 0
         growth = startup.get("growth_30d") or 0
-        if mrr < 50000 and customers < 100:
+        if mrr < MIN_MRR_CENTS or customers < MIN_CUSTOMERS:
             continue
-        if growth < -0.2:
+        if growth < MIN_ACCEPTABLE_GROWTH:
             continue
 
         startup_with_score = dict(startup)

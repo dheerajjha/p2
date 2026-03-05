@@ -5,7 +5,6 @@ from pathlib import Path
 
 from scripts.scrape_trustmrr import (
     copyability_score,
-    create_schema,
     normalize_startup,
     save_sqlite,
     select_copyable_startups,
@@ -96,7 +95,6 @@ class TrustMrrScraperTests(unittest.TestCase):
             save_sqlite(db_path, rows)
 
             with sqlite3.connect(db_path) as conn:
-                create_schema(conn)
                 result = conn.execute("SELECT COUNT(*), MAX(name) FROM startups").fetchone()
 
             self.assertEqual(result[0], 1)

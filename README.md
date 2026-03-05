@@ -4,13 +4,12 @@ This repo now includes a TrustMRR scraper that builds a structured SQLite databa
 
 ## Scraper source
 
-- `/home/runner/work/p2/p2/scripts/scrape_trustmrr.py`
-- `/home/runner/work/p2/p2/tests/test_scrape_trustmrr.py`
+- `scripts/scrape_trustmrr.py`
+- `tests/test_scrape_trustmrr.py`
 
 ## How to run
 
 ```bash
-cd /home/runner/work/p2/p2
 python scripts/scrape_trustmrr.py \
   --db output/trustmrr_startups.sqlite \
   --csv output/trustmrr_startups.csv \
