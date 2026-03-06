@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API_BASE = "https://trustmrr.com/api/v1/startups"
+HTML_SCRAPE_URLS = [
+    "https://trustmrr.com",
+    "https://trustmrr.com/acquire",
+]
 MAX_FAVORABLE_MULTIPLE = 48
 MIN_FAVORABLE_MULTIPLE = 12
 MIN_MRR_CENTS = 50000
@@ -95,6 +100,121 @@ def normalize_startup(item: dict[str, Any]) -> dict[str, Any]:
         "x_handle": item.get("xHandle"),
         "raw_json": json.dumps(item, separators=(",", ":"), ensure_ascii=False),
     }
+
+
+def normalize_startup_html(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a startup record scraped from TrustMRR HTML (RSC payload)."""
+    slug = item.get("slug")
+    mrr_dollars = to_float(item.get("currentMrr"))
+    last30d_dollars = to_float(item.get("currentLast30Days") or item.get("currentLast30DaysRevenue"))
+    total_dollars = to_float(item.get("currentTotalRevenue"))
+    asking_dollars = to_float(item.get("askingPrice"))
+    growth_pct = to_float(item.get("cachedGrowth30d") or item.get("growth30d"))
+    multiple = to_float(item.get("cachedMultiple") or item.get("multiple"))
+    profit_margin = to_float(item.get("profitMarginLast30Days"))
+    return {
+        "slug": slug,
+        "name": item.get("name"),
+        "description": item.get("description"),
+        "website": item.get("website"),
+        "source_url": f"https://trustmrr.com/startup/{slug}" if slug else None,
+        "country": item.get("country"),
+        "founded_date": item.get("foundedDate"),
+        "category": item.get("userCategory") or item.get("category"),
+        "payment_provider": item.get("paymentProvider"),
+        "target_audience": item.get("targetAudience"),
+        "customers": to_int(item.get("customers")),
+        "active_subscriptions": to_int(item.get("activeSubscriptions")),
+        "mrr_cents": int(mrr_dollars * 100) if mrr_dollars is not None else None,
+        "revenue_last_30d_cents": int(last30d_dollars * 100) if last30d_dollars is not None else None,
+        "revenue_total_cents": int(total_dollars * 100) if total_dollars is not None else None,
+        "asking_price_cents": int(asking_dollars * 100) if asking_dollars is not None else None,
+        "profit_margin_last_30d": (profit_margin / 100) if profit_margin is not None else None,
+        "growth_30d": (growth_pct / 100) if growth_pct is not None else None,
+        "multiple": multiple,
+        "on_sale": 1 if item.get("onSale") else 0,
+        "first_listed_for_sale_at": item.get("firstListedForSaleAt"),
+        "x_handle": item.get("xHandle"),
+        "raw_json": json.dumps(item, separators=(",", ":"), ensure_ascii=False),
+    }
+
+
+def _extract_startups_from_html(html: str) -> list[dict[str, Any]]:
+    """Extract startup objects embedded in Next.js RSC script tags."""
+    results: list[dict[str, Any]] = []
+    script_pattern = re.compile(r'<script[^>]*>(.*?)</\s*script[\s>][^>]*>', re.DOTALL | re.IGNORECASE)
+    obj_pattern = re.compile(r'\{"_id":"[a-f0-9]{24}"')
+
+    for script_match in script_pattern.finditer(html):
+        content = script_match.group(1)
+        if '"slug"' not in content and 'slug' not in content:
+            continue
+        rsc_match = re.match(r'self\.__next_f\.push\(\[1,"(.*)"\]\)', content, re.DOTALL)
+        if not rsc_match:
+            continue
+        try:
+            decoded = json.loads('"' + rsc_match.group(1) + '"')
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        for m in obj_pattern.finditer(decoded):
+            start = m.start()
+            depth = 0
+            for j in range(start, len(decoded)):
+                if decoded[j] == "{":
+                    depth += 1
+                elif decoded[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(decoded[start : j + 1])
+                            if obj.get("slug"):
+                                results.append(obj)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        break
+    return results
+
+
+def fetch_page_html(url: str) -> str:
+    headers = {
+        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 (compatible; p2-trustmrr-scraper/1.0)",
+    }
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8")
+
+
+def fetch_all_startups_html(urls: list[str] | None = None) -> list[dict[str, Any]]:
+    """Scrape startup data from TrustMRR public HTML pages (RSC payload)."""
+    if urls is None:
+        urls = HTML_SCRAPE_URLS
+
+    # Use a dict keyed by slug to allow merging additional fields from later pages
+    seen: dict[str, dict[str, Any]] = {}
+    for url in urls:
+        try:
+            html = fetch_page_html(url)
+        except (HTTPError, URLError, OSError) as exc:
+            print(f"Warning: could not fetch {url}: {exc}")
+            continue
+        raw_items = _extract_startups_from_html(html)
+        for item in raw_items:
+            slug = item.get("slug")
+            if not slug:
+                continue
+            normalized = normalize_startup_html(item)
+            if slug not in seen:
+                seen[slug] = normalized
+            else:
+                # Merge: fill in any missing fields from this later source
+                existing = seen[slug]
+                for key, val in normalized.items():
+                    if existing.get(key) is None and val is not None:
+                        existing[key] = val
+        time.sleep(0.5)
+    return list(seen.values())
 
 
 def fetch_all_startups(api_key: str | None, page_size: int = 50, max_pages: int | None = None) -> list[dict[str, Any]]:
@@ -271,9 +391,12 @@ def select_copyable_startups(startups: list[dict[str, Any]], top_n: int = 15) ->
     filtered = []
     for startup in startups:
         mrr = startup.get("mrr_cents") or 0
-        customers = startup.get("customers") or 0
+        customers = startup.get("customers")
         growth = startup.get("growth_30d") or 0
-        if mrr < MIN_MRR_CENTS or customers < MIN_CUSTOMERS:
+        if mrr < MIN_MRR_CENTS:
+            continue
+        # Only enforce the customer minimum when customer data is actually present
+        if customers is not None and customers < MIN_CUSTOMERS:
             continue
         if growth < MIN_ACCEPTABLE_GROWTH:
             continue
@@ -314,7 +437,8 @@ def render_readme(readme_path: Path, startups: list[dict[str, Any]], picks: list
         "",
         "## Copyable + profitable startup opportunities",
         "",
-        "Heuristic: prioritizes startups with healthy MRR, enough customer demand, and non-negative growth.",
+        "Heuristic: prioritizes startups with healthy MRR and non-negative growth. "
+        "Customer count data is not available from public HTML; the customer minimum filter is skipped when this field is absent.",
         "",
     ]
 
@@ -362,7 +486,19 @@ def main() -> int:
 
         api_key = getenv("TRUSTMRR_API_KEY")
 
-    startups = fetch_all_startups(api_key=api_key, max_pages=args.max_pages)
+    startups: list[dict[str, Any]] = []
+    if api_key:
+        try:
+            startups = fetch_all_startups(api_key=api_key, max_pages=args.max_pages)
+        except HTTPError as exc:
+            if exc.code == 401:
+                print("Warning: API key invalid or expired (401). Falling back to HTML scrape.")
+                startups = fetch_all_startups_html()
+            else:
+                raise
+    else:
+        print("No API key provided. Scraping public HTML pages.")
+        startups = fetch_all_startups_html()
 
     db_path = Path(args.db)
     csv_path = Path(args.csv)
