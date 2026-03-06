@@ -6,12 +6,63 @@ from pathlib import Path
 from scripts.scrape_trustmrr import (
     copyability_score,
     normalize_startup,
+    normalize_startup_html,
     save_sqlite,
     select_copyable_startups,
 )
 
 
 class TrustMrrScraperTests(unittest.TestCase):
+    def test_normalize_startup_html_converts_dollars_to_cents_and_pct_to_ratio(self):
+        payload = {
+            "slug": "demo",
+            "name": "Demo",
+            "currentMrr": 1000.50,
+            "currentLast30DaysRevenue": 900.25,
+            "currentTotalRevenue": 5000.00,
+            "askingPrice": 24000,
+            "cachedGrowth30d": 15.5,
+            "cachedMultiple": 24.0,
+            "onSale": True,
+            "profitMarginLast30Days": 80,
+            "xHandle": "demo_x",
+            "userCategory": "AI",
+        }
+
+        normalized = normalize_startup_html(payload)
+
+        self.assertEqual(normalized["slug"], "demo")
+        self.assertEqual(normalized["mrr_cents"], 100050)
+        self.assertEqual(normalized["revenue_last_30d_cents"], 90025)
+        self.assertEqual(normalized["revenue_total_cents"], 500000)
+        self.assertEqual(normalized["asking_price_cents"], 2400000)
+        self.assertAlmostEqual(normalized["growth_30d"], 0.155, places=5)
+        self.assertAlmostEqual(normalized["profit_margin_last_30d"], 0.80, places=5)
+        self.assertEqual(normalized["multiple"], 24.0)
+        self.assertEqual(normalized["on_sale"], 1)
+        self.assertEqual(normalized["x_handle"], "demo_x")
+        self.assertEqual(normalized["category"], "AI")
+
+    def test_select_copyable_startups_allows_missing_customer_data(self):
+        """When customer field is None (HTML-scraped), the filter should not exclude the startup."""
+        startups = [
+            {
+                "slug": "no-customers",
+                "name": "No Customers Field",
+                "mrr_cents": 200000,
+                "customers": None,
+                "growth_30d": 0.05,
+                "multiple": None,
+                "on_sale": 0,
+                "category": None,
+            },
+        ]
+
+        picks = select_copyable_startups(startups, top_n=5)
+
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(picks[0]["slug"], "no-customers")
+
     def test_normalize_startup_handles_basic_payload(self):
         payload = {
             "slug": "acme",
